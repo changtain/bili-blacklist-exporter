@@ -1,18 +1,21 @@
 # --- Never commit credentials ---
 cookie.txt
+cookie*.txt
 secrets.json
 .env
 .env.*
 *.cookie
 
-# --- Never commit your own exported blacklist ---
+# --- Never commit your own exported blacklist / operation logs ---
 output/
 bilibili_blacklist*.csv
 bilibili_blacklist*.txt
 bilibili_blacklist*.json
 blacklist_export*.csv
 *_uids.txt
+!examples/sample_uids.txt
 page*.json
+import_log*.jsonl
 
 # --- Python / editor / OS noise ---
 __pycache__/
