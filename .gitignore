@@ -1,0 +1,25 @@
+# --- Never commit credentials ---
+cookie.txt
+secrets.json
+.env
+.env.*
+*.cookie
+
+# --- Never commit your own exported blacklist ---
+output/
+bilibili_blacklist*.csv
+bilibili_blacklist*.txt
+bilibili_blacklist*.json
+blacklist_export*.csv
+*_uids.txt
+page*.json
+
+# --- Python / editor / OS noise ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
