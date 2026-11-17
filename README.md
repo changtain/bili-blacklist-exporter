@@ -1,162 +1,150 @@
 # bili-blacklist-exporter
 
-> Migrate a Bilibili (B站) blacklist between accounts: export UIDs from account A, import them into account B. Export is read-only; import is dry-run by default and requires explicit `--apply`.
+> **Move a Bilibili (B站) blacklist from one account to another — export from A, import into B.**
 
-B 站的黑名单页面只显示昵称和拉黑时间，不显示 UID，也没有导出/导入按钮。这个工具调用 B 站 Web 端自己使用的接口，完成两件事：
+B 站的黑名单被锁在账号里：页面只显示昵称和拉黑时间，不显示 UID，也没有导出或导入入口。换号、小号转大号、多账号同步时，只能靠人肉重新拉黑。
 
-1. **导出**：把账号 A 的黑名单整理成 CSV / TXT / JSON（只读）。
-2. **导入**：把 UID 列表批量拉黑到账号 B（写操作，默认 dry-run）。
+这个工具基于一个判断：**黑名单是一份数据，应该像通讯录一样可导出、可校验、可迁移。** 它调用 B 站 Web 端自己使用的接口，把这件事拆成两个可独立使用的阶段。
 
-典型用途是小号转大号、换账号后恢复黑名单、或把一份可信 UID 清单批量拉黑。
-
----
-
-## ⚠️ 先读隐私说明
-
-- **导出的 CSV / TXT 属于你的私人数据**：里面有你拉黑过的所有账号 UID、昵称和签名。不要把它提交到公开仓库、发到群里或贴进 Issue。
-- **Cookie 等于账号凭证**：不要提交 `cookie.txt`，不要把 Cookie 发给任何人（包括本项目作者），不要写进截图。
-- 本仓库根目录的 `.gitignore` 已排除 `cookie.txt`、`output/`、`page*.json`、`bilibili_blacklist*.csv|txt|json`。发布前仍建议执行一次隐私扫描（见文末）。
-- 项目**不联网上传任何数据**：命令行版只请求 `api.bilibili.com`；浏览器版只在当前页面内发请求并把结果下载到本地。
+- **导出**（只读）：把账号 A 的黑名单整理成 UID 清单。
+- **导入**（写入）：把 UID 清单批量拉黑到账号 B，默认空跑、显式确认、全程留痕。
 
 ---
 
-## 两种方式
+## 迁移流程
+
+```
+账号 A ──导出──> UID 清单 ──校验──> 账号 B ──导入──> 完成
+ (源)           TXT/CSV/JSON       (目标)
+```
+
+| 步骤 | 做什么 | 用的脚本 | 是否会改动账号 |
+|---|---|---|---|
+| 1. 导出 | 登录账号 A，拿到全部 UID | `export_blacklist.py` 或控制台脚本 | 否，只读 |
+| 2. 校验 | 检查 UID 数量、格式、是否有误 | 人工看一眼 TXT / CSV | 否 |
+| 3. 导入 | 登录账号 B，批量拉黑 | `import_blacklist.py` | **是**，需 `--apply` 才执行 |
+
+整个流程不需要在两个账号间共享 Cookie：账号 A 只用来读，账号 B 只用来写，各自的登录态互不接触。
+
+---
+
+## 快速开始
+
+### 第 1 步：从账号 A 导出
+
+最省事的方式——在账号 A 的登录态下，打开 [黑名单页](https://account.bilibili.com/account/blacklist)，按 `F12` → Console，若提示 `allow pasting` 先手动输入这行并回车，然后粘贴 [`browser/export_console.js`](browser/export_console.js) 全文，浏览器会自动下载 `bilibili_blacklist.csv`。
+
+需要机器可读的纯 UID 清单时，用命令行版：
+
+```bash
+# Cookie 获取：F12 -> Network -> 任一 bilibili.com 请求 -> Request Headers -> Cookie
+python export_blacklist.py --out ./export_a --formats csv,txt
+```
+
+导出得到的 `bilibili_blacklist_uids.txt` 就是第 3 步的输入。
+
+### 第 2 步：校验清单
+
+打开 TXT，确认行数与账号 A 的黑名单数量一致、每行都是纯数字 UID。示例见 [`examples/sample_uids.txt`](examples/sample_uids.txt)。
+
+### 第 3 步：导入到账号 B
+
+把 `cookie.txt` 换成**账号 B** 的登录态（必须含 `bili_jct`），先空跑：
+
+```bash
+# 空跑：只统计和预览，不写入任何数据
+python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt --cookie-file cookie_B.txt
+
+# 小批量试水：先真实拉黑 5 个，确认生效
+python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt \
+  --cookie-file cookie_B.txt --apply --limit 5 --delay 2.0
+
+# 全量迁移
+python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt \
+  --cookie-file cookie_B.txt --apply --yes
+```
+
+也可以用浏览器版 [`browser/import_console.js`](browser/import_console.js)：登录账号 B，在黑名单页打开控制台，把 UID 填进脚本顶部的 `UID_TEXT`，先保持 `DO_IMPORT = false` 跑一次看预览，确认无误再改成 `true` 重新粘贴。
+
+---
+
+## 写操作的安全设计
+
+导入会真实修改账号 B 的数据，因此默认按"最小意外"原则设计：
+
+| 机制 | 行为 |
+|---|---|
+| **默认空跑** | 不加 `--apply` 不发任何写请求、不创建日志文件 |
+| **显式确认** | `--apply` 下仍需输入 `yes`；`--yes` 仅供脚本化场景 |
+| **自动去重** | 跳过账号 B 自身 UID、以及已在黑名单中的 UID，不做无效请求 |
+| **限速** | 默认每次写入间隔 1.5 秒，避免触发风控 |
+| **熔断** | 遇到 `-101 / -403 / -352 / 412 / 22001` 立即停止，不继续消耗批次 |
+| **审计日志** | 每个 UID 的结果写入 `import_log.jsonl`（状态码、时间、批次号），便于核对与补跑 |
+| **灰度入口** | `--limit N` 先跑 N 个验证效果，再全量执行 |
+
+---
+
+## 隐私与凭证
+
+- **导出的 UID 清单是私人数据**：包含你拉黑过的所有账号。不要提交到公开仓库、发到群里或贴进 Issue。
+- **Cookie 等于账号凭证**：不要提交 `cookie.txt` / `cookie_B.txt`，不要把 Cookie 发给任何人，不要连同截图外传。
+- `.gitignore` 已排除 `cookie*.txt`、`output/`、`page*.json`、`bilibili_blacklist*.csv|txt|json`、`*_uids.txt`、`import_log*.jsonl`。
+- 工具**不上传任何数据到第三方**：所有请求只发往 `api.bilibili.com`，结果只落在本机或从浏览器下载。
+- 两个账号的 Cookie 从不需要同时出现在同一处：导出和导入是两个独立步骤。
+
+---
+
+## 运行方式与参数
+
+两种方式覆盖不同场景：
 
 | | 浏览器控制台 | 命令行 |
 |---|---|---|
-| 适合 | 绝大多数用户，一次性导出 | 定期备份、脚本化、CI |
-| 凭证处理 | 浏览器自动携带，**不需要复制 Cookie** | 需要手动提供 Cookie |
-| 依赖 | 只需 Chrome / Edge / Brave | Python 3.8+，无第三方库 |
-| 输出 | 浏览器下载 CSV | CSV / TXT / JSON |
+| 适合 | 一次性迁移，不想处理 Cookie | 批量、定期、脚本化 |
+| 凭证 | 浏览器自动携带，无需复制 | 需要把 Cookie 存入文件 |
+| 依赖 | Chrome / Edge / Brave | Python 3.8+，仅标准库 |
+| 输出 | 浏览器下载 CSV | CSV / TXT / JSON + 审计日志 |
 
-**推荐优先用浏览器控制台方式**，它是凭证风险最低的路径。
-
----
-
-## 方式 A：浏览器控制台（推荐）
-
-1. 登录 B 站，打开 <https://account.bilibili.com/account/blacklist>
-2. 按 `F12` → 切到 `Console`（控制台）
-3. 若 Chrome 提示 `Don't paste code...`，先手动输入 `allow pasting` 并回车
-4. 把 [`browser/export_console.js`](browser/export_console.js) 全文粘贴进去，回车
-5. 浏览器自动下载 `bilibili_blacklist.csv`
-
-脚本会逐页请求直到达到接口声明的总数，控制台会打印每页进度。全程不读取、不打印、不外传 Cookie。
-
-> 想更省事，用 [`browser/bookmarklet.txt`](browser/bookmarklet.txt)：把里面那一行 `javascript:...` 复制成浏览器书签的网址，之后在黑名单页点一下书签即可导出，不必每次打开控制台。
-
----
-
-## 方式 B：命令行
-
-```bash
-# 1. 拿到 Cookie：F12 -> Network -> 任一 bilibili.com 请求 -> Request Headers -> Cookie
-#    把整条 Cookie 字符串存到同目录的 cookie.txt（该文件已被 .gitignore 排除）
-
-# 2. 导出
-python export_blacklist.py
-
-# 自定义输出目录、格式、限速
-python export_blacklist.py --out ./backup --formats csv,txt,json --delay 0.5
-
-# 也可以用环境变量，避免 Cookie 落盘
-BILI_COOKIE='SESSDATA=...; buvid3=...' python export_blacklist.py
-```
+导出脚本参数：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--cookie` | — | 直接传 Cookie 字符串（会留在 shell history，不推荐） |
-| `--cookie-file` | `cookie.txt` | 读取 Cookie 的文件 |
 | `--out` | `output` | 输出目录 |
-| `--name` | `bilibili_blacklist` | 输出文件名前缀 |
-| `--formats` | `csv,txt` | 逗号分隔，可选 `csv` / `txt` / `json` |
-| `--delay` | `0.25` | 每页间隔秒数；遇到风控调到 `1.0` |
-| `--timeout` | `20` | 单次请求超时秒数 |
+| `--name` | `bilibili_blacklist` | 文件名前缀 |
+| `--formats` | `csv,txt` | 可选 `csv` / `txt` / `json` |
+| `--delay` | `0.25` | 每页间隔秒数 |
+| `--cookie-file` | `cookie.txt` | Cookie 文件 |
+| `--timeout` | `20` | 单次请求超时 |
 
-输出示例见 [`examples/sample_output.csv`](examples/sample_output.csv)（全部为虚构数据）。
+导入脚本参数：
 
----
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `input` | 必填 | TXT / CSV(uid 列) / JSON 路径 |
+| `--apply` | 关 | 打开才会真正写入 |
+| `--yes` | 关 | 跳过交互确认 |
+| `--limit` | `0` | 只处理前 N 个，0 表示全部 |
+| `--delay` | `1.5` | 写请求间隔秒数 |
+| `--log` | `import_log.jsonl` | 审计日志路径 |
+| `--cookie-file` | `cookie.txt` | 目标账号的 Cookie 文件 |
 
-## 输出字段
-
-| 列 | 含义 |
-|---|---|
-| `uid` | B 站用户 UID（`mid`） |
-| `uname` | 昵称 |
-| `blocked_at` | 拉黑时间，本地时区 `YYYY-MM-DD HH:MM:SS` |
-| `space_url` | 个人空间链接 `https://space.bilibili.com/<uid>` |
-| `sign` | 个性签名（换行已折叠为空格） |
-
-CSV 带 UTF-8 BOM，Excel 双击即可正常显示中文；TXT 是纯 UID，一行一个，方便喂给其他脚本。两种方式的字段顺序与内容一致。
+导出字段：`uid`、`uname`、`blocked_at`（本地时区）、`space_url`、`sign`。CSV 带 UTF-8 BOM，Excel 可直接打开；TXT 是纯 UID，一行一个，专供导入脚本消费。
 
 ---
 
 ## 接口说明（给二次开发者）
 
+**导出**：
+
 ```
 GET https://api.bilibili.com/x/relation/blacks?re_src=32&pn=<page>&ps=50
 ```
 
-- 需要登录态 Cookie（`SESSDATA` 等）。未登录返回 `code: -101`。
-- `ps` 会被服务端**限制到 50**，传更大的值无效，所以必须分页。
-- `data.total` 是黑名单总数；最后一页通常不足 50 条，应作为终止条件之一。
-- `data.list[]` 主要字段：`mid`、`uname`、`mtime`（Unix 秒）、`sign`、`face`、`attribute`、`tag`。
-- 常见错误码：`-101` 未登录 / Cookie 失效；`-352`、`412` 触发风控，需加大请求间隔。
-- 这是 **Web 端内部接口，不是公开开放 API**，B 站随时可能调整。工具对此不做兼容性承诺。
+- `ps` 被服务端限制为 50，必须分页；`data.total` 是总数，最后一页通常不足 50。
+- `data.list[]` 字段：`mid`、`uname`、`mtime`（Unix 秒）、`sign`、`face`、`attribute`、`tag`。
+- 终止条件建议同时判断：空列表、累计去重数 >= `data.total`、页数上限。
 
-分页终止条件建议同时判断：空列表、`累计去重条数 >= data.total`、以及页数上限，避免异常时死循环。
-
----
-
-## 常见问题
-
-| 现象 | 处理 |
-|---|---|
-| Chrome 提示 `allow pasting` | 在控制台手动输入 `allow pasting` 后回车，再粘贴 |
-| `code: -101 账号未登录` | Cookie 失效或未传；重新登录并复制新的 Cookie |
-| `code: -352` / `412` | 请求过快触发风控，加 `--delay 1.0` 或稍后重试 |
-| Excel 打开中文乱码 | 用本工具生成的 CSV 已带 BOM；若仍乱码，用「数据 → 从文本/CSV」并选 UTF-8 |
-| 导出条数与页面页数对不上 | 网页按约 20 条/页展示，接口按 50 条/页返回，以 `data.total` 为准 |
-| 想要增删黑名单 | 用导入脚本 `import_blacklist.py`，见下方「导入」章节 |
-
----
-
-## 迁移：把账号 A 的黑名单搬到账号 B
-
-### 第 1 步：从账号 A 导出
-
-用上面的导出脚本（控制台或 CLI），得到 `bilibili_blacklist.csv` 或纯 UID 的 `.txt`。建议用 CLI 以便后续脚本读取：
-
-```bash
-python export_blacklist.py --out ./export_a --formats csv,txt
-```
-
-### 第 2 步：导入到账号 B
-
-**先 dry-run**，确认数量和 UID 无误后再 `--apply`：
-
-```bash
-# 把 cookie.txt 换成账号 B 的登录态（含 bili_jct）
-python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt --cookie-file cookie_B.txt
-
-# 确认输出无误后，加 --apply 真正写入；首次建议先小批量试水
-python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt \
-  --cookie-file cookie_B.txt --apply --limit 5 --delay 2.0
-
-# 全量执行
-python import_blacklist.py ./export_a/bilibili_blacklist_uids.txt \
-  --cookie-file cookie_B.txt --apply --yes
-```
-
-脚本的安全设计：
-
-- **默认 dry-run**，不加 `--apply` 不会写入任何数据
-- `--apply` 下仍需交互输入 `yes` 确认（或用 `--yes` 跳过，用于脚本化）
-- 自动跳过**目标账号自身的 UID** 和**已在黑名单中的 UID**，不做重复请求
-- 每批写操作默认间隔 `1.5s`，可通过 `--delay` 调整；遇到风控码 `-352` / `412` 会**立即停止**
-- 每个 UID 的结果写入 `import_log.jsonl`（含状态码、时间、批次号），便于审计与补跑
-
-### 导入接口说明
+**导入**：
 
 ```
 POST https://api.bilibili.com/x/relation/modify
@@ -165,25 +153,38 @@ Content-Type: application/x-www-form-urlencoded
 fid=<目标UID>&act=5&re_src=11&csrf=<bili_jct>
 ```
 
-- `act=5` 拉黑，`act=6` 取消拉黑（本工具只用 5）
-- `csrf` 来自 Cookie 中的 `bili_jct`，缺失时脚本直接报错
-- 判断某 UID 是否已拉黑：拉黑列表中该用户的 `attribute & 128`（位标志）
-- 常见错误码：`-101` Cookie 失效、`-403` CSRF 被拒、`-352` 风控、`-412` IP 被拦、`22001` 不能拉黑自己
+- `act=5` 拉黑，`act=6` 取消拉黑；本工具只使用 5。
+- `csrf` 取自 Cookie 中的 `bili_jct`，缺失时脚本直接报错退出。
+- 判断某 UID 是否已拉黑：黑名单列表中的 `attribute & 128`（位标志）。
 
-### 浏览器版导入
+**错误码**：`-101` Cookie 失效、`-403` CSRF 被拒、`-352` 风控、`-412` IP 被拦、`22001` 不能拉黑自己。
 
-[`browser/import_console.js`](browser/import_console.js) 提供同样能力的控制台版本：登录**目标账号**，在黑名单页打开控制台，把 UID 填进脚本顶部的 `UID_TEXT`，并将 `DO_IMPORT` 改为 `true` 后粘贴运行。**同样需要先 dry-run 一次确认清单。**
+以上均为 B 站 **Web 端内部接口，不是公开开放 API**，随时可能调整，本项目不承诺兼容性。
 
 ---
 
-## 范围与路线图
+## 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| 控制台提示 `allow pasting` | 手动输入 `allow pasting` 回车后再粘贴 |
+| `code: -101 账号未登录` | Cookie 失效，重新登录并复制新的 |
+| `code: -352` / `412` | 请求过快触发风控，加大 `--delay` 或稍后重试 |
+| 导出数量与网页页数对不上 | 网页约 20 条/页，接口 50 条/页，以 `data.total` 为准 |
+| 导入后数量少于清单 | 脚本已跳过自身 UID 和已拉黑 UID；查 `import_log.jsonl` |
+| Excel 打开 CSV 中文乱码 | 用「数据 → 从文本/CSV」并选 UTF-8 编码 |
+| 想撤销刚导入的黑名单 | 目前用网页手动取消；`act=6` 的回滚脚本见路线图 |
+
+---
+
+## 路线图
 
 - [x] 导出黑名单为 CSV / TXT / JSON
-- [x] 从 UID 列表批量导入（dry-run 默认、二次确认、限速、审计日志）
-- [ ] 取消拉黑（`act=6`），用于回滚
+- [x] 从 UID 清单批量导入（空跑默认、二次确认、限速、熔断、审计日志）
+- [ ] `act=6` 取消拉黑，提供一键回滚
 - [ ] 两次导出做 diff，展示新增 / 移除的 UID
-- [ ] 浏览器扩展版，提供一键按钮
-- [ ] 支持导出为 Markdown 表格
+- [ ] 浏览器扩展版，提供一键迁移按钮
+- [ ] 迁移完成后自动生成校验报告
 
 ---
 
@@ -194,54 +195,19 @@ bili-blacklist-exporter/
 ├── README.md                    # 本文档
 ├── LICENSE                      # MIT
 ├── .gitignore                   # 排除凭证与导出数据
-├── export_blacklist.py          # 命令行导出器（仅标准库，只读）
-├── import_blacklist.py          # 命令行导入器（写操作，dry-run 默认）
+├── export_blacklist.py          # 阶段 1：导出（只读）
+├── import_blacklist.py          # 阶段 3：导入（写入，空跑默认）
 ├── browser/
-│   ├── export_console.js        # 导出：控制台脚本（零凭证操作）
-│   ├── bookmarklet.txt          # 导出：一行版，可存为书签
-│   └── import_console.js        # 导入：控制台脚本（需显式开启写入）
+│   ├── export_console.js        # 导出：控制台版
+│   ├── bookmarklet.txt          # 导出：一行版书签
+│   └── import_console.js        # 导入：控制台版
 └── examples/
-    └── sample_output.csv         # 虚构数据示例
+    ├── sample_output.csv        # 虚构的导出示例
+    └── sample_uids.txt          # 虚构的 UID 清单示例
 ```
-
----
-
-## 发布到 GitHub（本地操作）
-
-本机 `git` 可用，`gh` CLI 未安装，所以使用手写 remote 的方式：
-
-```bash
-cd bili-blacklist-exporter
-
-git init          # 若目录已初始化过，可跳过这一步
-git add .
-git commit -m "Initial release: Bilibili blacklist exporter"
-
-# 先在 GitHub 网页新建一个**空**仓库（不要勾选 Add README / .gitignore / License）
-git remote add origin https://github.com/<YOUR_NAME>/bili-blacklist-exporter.git
-git branch -M main
-git push -u origin main
-```
-
-**推送前做一次隐私扫描**，确认没有任何真实 UID、昵称或 Cookie 被带进去：
-
-```bash
-# 列出即将提交的文件，人工确认没有 cookie.txt / output/ / page*.json
-git status --short
-git ls-files
-
-# 搜索可能的凭证关键字（应无输出）
-git grep -n -E 'SESSDATA|bili_jct|DedeUserID' -- . ':!README.md' || echo "clean"
-```
-
-建议的仓库描述：
-
-> Export your Bilibili blocked-user list (UIDs, nicknames, timestamps) to CSV/TXT/JSON. Privacy-first, read-only, standard library only.
-
-建议 topics：`bilibili` `blacklist` `export` `csv` `privacy` `python` `userscript`
 
 ---
 
 ## License
 
-[MIT](LICENSE). 本项目与哔哩哔哩官方无关联；使用风险由使用者自行承担。
+[MIT](LICENSE)。本项目与哔哩哔哩官方无关联；写操作风险由使用者自行承担，使用前请先用 `--limit` 小批量验证。
